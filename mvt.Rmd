@@ -1,0 +1,322 @@
+---
+title: "Motor Vehicle Theft in New Zealand"
+author: "Amantay Abdurakhmanov"
+output:
+  pdf_document: default
+  word_document: default
+  
+  
+---
+
+## Import packages
+
+```{r}
+#install.packages("readr")
+#install.packages("dplyr")
+#
+#install.packages("survival")
+#install.packages("survminer")
+
+library(readr)
+library(dplyr)
+
+library(survival) #kaplan-Meier esatimator
+library(survminer) #drawing 'ready-to-publish' survival curves
+
+library(gridExtra)
+library(grid)
+```
+
+## Read all the snapshots from a folder
+
+```{r}
+dFile_path <- "./stolen_cars_data"; #folder directory with files
+file_list <- list.files(path = dFile_path, pattern = ".csv", full.names = TRUE) 
+file_list #list of csv files
+
+i<-0;
+list_i <- list();
+total_list <- list();
+for (file_i in file_list) {
+  i<-i+1;
+  
+  list_i <- read_csv(file_i, col_names = FALSE);
+  list_i <- list_i %>% mutate(list_date = max(X7)) #snapshot date - max of stolen dates in particular file
+  
+  total_list<-rbind(total_list, list_i);
+
+}
+total_list
+
+total_list2 <- total_list
+
+colnames(total_list2) <-c("registration_number"
+                          , "colour"
+                          , "make"
+                          , "model"
+                          , "production_date"
+                          , "type"
+                          , "stolen_date"
+                          , "stolen_place"
+                          , "list_date");
+
+total_list2
+```
+
+## Group by vehicles
+
+```{r}
+
+max_date <- max(total_list2$stolen_date)#most recent file date
+
+
+total_list3 <- total_list2 %>% 
+  group_by(registration_number, colour, make, model, production_date, type, stolen_date, stolen_place) %>% 
+  summarise(recovery_date = max(ifelse(max(list_date)<stolen_date+180 & max(list_date) < max_date
+                                  , max(list_date)
+                                  , NA
+                                )
+                            )
+            , .groups = 'drop_last'
+            )
+    
+total_list3$recovery_date = as.Date(total_list3$recovery_date, origin = "1970-01-01")
+agg_records <- total_list3;
+agg_records
+```
+
+## Data cleaning and processing
+
+```{r}
+#observation max_date(last file date)
+agg_records <- agg_records %>% mutate(observation_date = max_date);
+agg_records
+
+#removing last day
+agg_records <- agg_records %>% filter((recovery_date < max_date)|(is.na(recovery_date)))
+agg_records
+
+#removing MV with wrong production_date
+agg_records <- agg_records %>% filter(production_date >= 1900)
+agg_records
+
+#removing MV with wrong NA feature values
+agg_records <- agg_records %>% filter((is.na(registration_number) == FALSE)&(is.na(colour) == FALSE)&(is.na(make) == FALSE)&(is.na(model) == FALSE)&(is.na(type) == FALSE))
+agg_records
+
+#adding recovery_days
+agg_records <- agg_records %>% mutate(recovery_days = as.integer(recovery_date - stolen_date)); 
+agg_records
+
+#adding recovery_days output for recovered = 1
+agg_records <- agg_records %>% mutate(output = as.integer(!is.na(recovery_days)));
+agg_records
+
+#censored recovery_days for survival model
+agg_records <- agg_records %>% mutate(recovery_days_censored = ifelse(!is.na(recovery_days)
+                                                                ,recovery_days 
+                                                                ,min(as.integer(observation_date - stolen_date), 180)
+                                                                )
+                                      );
+agg_records$recovery_days_censored
+
+#grouping by production year
+agg_records <- agg_records %>% mutate(production_group = 
+                                        ifelse(production_date<1990, "1989-"
+                                               ,ifelse(production_date>=1990 & production_date<=1999, "1990-1999"
+                                                       ,ifelse(production_date>=2000 & production_date<=2010, "2000-2010"
+                                                               , ifelse(production_date>=2011 & production_date<=2015, "2011-2015"
+                                                                        , "2016+"
+                                                                        )
+                                                         
+                                                              )
+                                                       )
+                                               )
+                                      );
+  agg_records
+
+#grouping by colour
+agg_records <- agg_records %>% mutate(colour_short_list = 
+                                        ifelse(colour %in% c("Black", "Blue", "Green", "Grey", "Red", "Silver", "White"), colour, "Other")
+);
+agg_records
+
+
+#grouping by type
+agg_records <- agg_records %>% mutate(type_short_list = 
+                                        ifelse(type %in% c("Roadbike", "Moped"), "Roadbike/Moped"
+                                               ,ifelse(type %in% c("Mobile Home - Light", "Trailer", "Boat Trailer", "Trailer - Heavy", "Caravan", "Off Road Trailer"), "Trailer"
+                                                       ,ifelse(type %in% c("Flat Deck Truck", "Cab and Chassis Only", "Heavy Van", "Service Coach", "Utility", "Light Bus", "Light Van", "Other Truck"), "Truck/Utilitiy"
+                                                               , "Car"
+                                                               
+                                                       )
+                                               )
+                                        )
+);
+agg_records
+
+```
+
+## Create final data frames
+
+```{r}
+#stolen day of week
+agg_records <- agg_records %>% mutate(stolen_wday = as.POSIXlt(stolen_date)$wday);
+agg_records
+#####################################################
+#final dataset
+write.csv(agg_records, file = "agg_records.csv")
+
+#only recovered
+total_recovered<- agg_records %>% filter(output ==1);
+total_recovered
+write.csv(total_recovered, file = "total_recovered.csv")
+
+
+#only stolen in considering period
+stolen_during_period<- agg_records %>% filter(stolen_date >="2019-07-25");
+stolen_during_period
+write.csv(stolen_during_period, file = "stolen_during_period.csv")
+```
+
+## Support analysis and graphs
+
+```{r}
+
+#plotting
+plot(seq(from = 1, to = nrow(total_recovered), by = 1), t(total_recovered["recovery_days"]), ylab = "recovery_days")
+hist(t(total_recovered["recovery_days"]), breaks = 180, xlab = "recovery days", ylab="number of recovered cars", main = NULL)
+hist(t(total_recovered["recovery_days"]), breaks = 180, xlab = "recovery days", ylab="density", freq = FALSE, main = NULL)
+
+table(stolen_during_period["stolen_place"])
+
+#write.csv(cbind(table(stolen_during_period["stolen_place"]),table(stolen_during_period["stolen_place"])/nrow(stolen_during_period)), file = "stolen_place.csv")
+#write.csv(cbind(table(total_recovered["stolen_place"]),table(total_recovered["stolen_place"])/nrow(total_recovered)), file = "recovered_place.csv")
+#write.csv(table(total_recovered["stolen_place"])/table(stolen_during_period["stolen_place"]), file = "recovered_to_stolen_place.csv")
+
+
+stolen_place <-cbind(table(stolen_during_period["stolen_place"]),round(table(stolen_during_period["stolen_place"])/nrow(stolen_during_period)*100,1))
+stolen_place <-rbind(stolen_place, c(sum(stolen_place[,1]), round(sum(stolen_place[,2]))) )
+
+recovered_place<-cbind(table(total_recovered["stolen_place"]),round(table(total_recovered["stolen_place"])/nrow(total_recovered)*100, 1));
+recovered_place <-rbind(recovered_place, c(sum(recovered_place[,1]), round(sum(recovered_place[,2]))) )
+
+recovered_to_stolen_place<-round(recovered_place[,1]/stolen_place[,1]*100)
+
+stolen_recovery <- cbind(stolen_place, recovered_place, recovered_to_stolen_place);
+colnames(stolen_recovery) <- c("    MVT   ", "MVT,\n% of total", "Recovered", "Recovered,\n% of total", "Recovered/MVT,\n%");
+
+grid.arrange(tableGrob(stolen_recovery), nrow=1)
+write.csv(stolen_recovery, file = "stolen_recovery.csv")
+
+
+#population of the districts
+pop <- c(452280, 340950, 569000, 356340, 528760, 205870, 163090, 309870,  179540, 354880, 565620, 483220) 
+
+stolen_place_pop <-cbind(pop, round(table(stolen_during_period["stolen_place"])/pop*10000,2))
+stolen_place_pop <-rbind(stolen_place_pop, c(sum(stolen_place_pop[,1]), round(nrow(stolen_during_period)/sum(pop)*10000,2)))
+
+recovered_place_pop <- cbind(round(table(total_recovered["stolen_place"])/pop*10000, 2))
+recovered_place_pop <-rbind(recovered_place_pop, round(nrow(total_recovered)/sum(pop)*10000,2))
+
+never_recovered_place_pop <-stolen_place_pop[,2] - recovered_place_pop
+
+stolen_recovery_pop <- cbind(stolen_place_pop, recovered_place_pop, never_recovered_place_pop);
+colnames(stolen_recovery_pop) <- c("Population", "MVT,\n per 10000", "Recovered,\n per 10000", "Never recovered,\n per 10000");
+
+grid.arrange(tableGrob(stolen_recovery_pop), nrow=1)
+write.csv(stolen_recovery_pop, file = "stolen_recovery_pop.csv")
+
+
+
+table(total_recovered["recovery_days"]<=1)/ nrow(stolen_during_period);
+table(total_recovered["recovery_days"]<=1)/ nrow(total_recovered);
+
+table(total_recovered["recovery_days"]<=3)/ nrow(stolen_during_period);
+table(total_recovered["recovery_days"]<=3)/ nrow(total_recovered);
+
+
+table(total_recovered["recovery_days"]<=7)/ nrow(stolen_during_period);
+table(total_recovered["recovery_days"]<=7)/ nrow(total_recovered);
+
+table(total_recovered["recovery_days"]<=30)/ nrow(stolen_during_period);
+table(total_recovered["recovery_days"]<=30)/ nrow(total_recovered);
+
+
+stolen_wday<-rbind(round(table(stolen_during_period["stolen_wday"])/nrow(stolen_during_period)*100,2))
+stolen_wday<-cbind(stolen_wday, 100);
+colnames(stolen_wday)<-c("Sunday,\n %", "Monday,\n %", "Tuesday,\n %", "Wednesday,\n %", "Thursday,\n %", "Friday,\n %", "Saturday,\n %", "Total,\n %")
+grid.arrange(tableGrob(stolen_wday), nrow=1)
+write.csv(stolen_wday, file = "stolen_wday.csv");
+
+table(stolen_during_period["stolen_wday"])
+chisq.test(table(stolen_during_period["stolen_wday"]))
+```
+
+## Survival Analysis by Theft place
+
+```{r}
+
+table(stolen_during_period$recovery_days_censored)
+surv_object <- Surv(time = stolen_during_period$recovery_days_censored, event = stolen_during_period$output);
+surv_object 
+
+fit1 <- survfit(formula = surv_object ~ stolen_place, data = stolen_during_period)
+summary(fit1)
+ggsurvplot(fit1, data = stolen_during_period, pval = TRUE)
+```
+
+## Survival Analysis by production year
+
+```{r}
+#Survival curve for MV production date
+table(stolen_during_period$production_group)
+fit2 <- survfit(formula = surv_object ~ production_group, data = stolen_during_period)
+summary(fit2)
+ggsurvplot(fit2, data = stolen_during_period
+           , surv.median.line = "hv"
+           , legend.title = "MV production date"
+           , legend.labs = c("1989-", "1990-1999", "2000-2010", "2011-2015", "2016+")           
+           , pval = TRUE
+           , conf.int = TRUE
+           , risk.table = TRUE)
+```
+
+## Survival Analysis by vehicle type
+
+```{r}
+#Survival curve for MV type
+table(stolen_during_period$type)
+table(stolen_during_period$type_short_list)
+fit3 <- survfit(formula = surv_object ~ type_short_list, data = stolen_during_period)
+summary(fit3)
+ggsurvplot(fit3, data = stolen_during_period
+          , surv.median.line = "hv"
+          , legend.title = "MV Type"
+          , legend.labs = c("Car", "Roadbike/Moped", "Trailer", "Truck/Utilitiy")
+          , pval = TRUE
+          , conf.int = TRUE
+          , risk.table = TRUE)
+
+
+#Combinated
+#fit4 <- survfit(formula = surv_object ~ production_group + type_short_list, data = stolen_during_period)
+#summary(fit4)
+#ggsurvplot(fit4, data = stolen_during_period
+#           , surv.median.line = "hv"
+#           #, legend.title = "MV Type",
+#           #, legend.labs = c("Car", "Roadbike/Moped", "Trailer", "Truck/Utilitiy")
+#           , pval = TRUE
+#           , conf.int = TRUE
+#           , risk.table = TRUE)
+
+
+#Colour
+#table(stolen_during_period$colour)
+#table(stolen_during_period$colour_short_list)
+#fit7 <- survfit(formula = surv_object ~ colour_short_list, data = stolen_during_period)
+#summary(fit7)
+#ggsurvplot(fit7, data = stolen_during_period, pval = TRUE, conf.int = TRUE)
+
+```
+
